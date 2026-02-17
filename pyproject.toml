@@ -1,0 +1,14 @@
+[project]
+name = "eeg-ml-pipeline"
+version = "0.1.0"
+description = "EEG model training pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scikit-learn>=1.4"
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
