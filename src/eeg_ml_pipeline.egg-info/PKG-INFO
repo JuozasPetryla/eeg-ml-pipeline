@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: eeg-ml-pipeline
+Version: 0.1.0
+Summary: EEG model training pipeline
+Requires-Python: >=3.11
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.2
+Requires-Dist: scikit-learn>=1.4
+Requires-Dist: mne>=1.6
+Requires-Dist: scipy>=1.12

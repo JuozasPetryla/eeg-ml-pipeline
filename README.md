@@ -17,8 +17,8 @@ pip install -e .
 
 You can run scripts either normally on your local machine:
 
-`python -m src.ml.train`
+`python -m src.ml.statistics`
 
 Or you can run scripts against local docker container:
 
-`docker exec -it eeg-ml-pipeline python -m src.ml.train`
+`docker exec -it eeg-ml-pipeline python -m src.ml.statistics`

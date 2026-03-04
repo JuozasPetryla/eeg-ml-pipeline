@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+src/eeg_ml_pipeline.egg-info/PKG-INFO
+src/eeg_ml_pipeline.egg-info/SOURCES.txt
+src/eeg_ml_pipeline.egg-info/dependency_links.txt
+src/eeg_ml_pipeline.egg-info/requires.txt
+src/eeg_ml_pipeline.egg-info/top_level.txt
+src/ml/__init__.py
+src/ml/train.py
