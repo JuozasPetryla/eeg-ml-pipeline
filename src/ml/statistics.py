@@ -63,6 +63,7 @@ PASTABOS:
   • Reikšmių formato: (mean_%, std_%) santykinės galios procentais.
 """
 
+from ml.job_repository import get_object_storage_key_by_job_id
 import mne
 import numpy as np
 import os
@@ -542,39 +543,91 @@ def power_bar(pct: float, width: int = 20) -> str:
     filled = int(round(pct / 100 * width))
     return "█" * filled + "░" * (width - filled)
 
+import argparse
+from ml.result_writer import store_analysis_result
+from ml.db import get_db
+from ml.file_storage import download_file
+from ml.job_repository import get_object_storage_key_by_job_id
 
 def main():
-    target_file = "tmp_data/random_testuks.edf"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--job_id", type=int, required=False)
+    parser.add_argument("--local", action="store_true")
+    args = parser.parse_args()
 
-    print(f"\n--- EEG Signalų Analizė: {target_file} ---")
+    analysis_job_id = 1 if not args.job_id else args.job_id
+    local_file_path = None
+    results = None
 
-    results = analyze_eeg_clinical(target_file, measure_type=MeasureType.RESTING_EYES_CLOSED)
 
-    if not results:
-        print("Nepavyko paskaičiuoti metrikų.")
-        return
+    try:
+        if args.local:
+            target_file = "tmp_data/random_testuks.edf"
+            print(f"\n--- EEG Signalų Analizė: {target_file} ---")
 
-    info = results["informacija"]
-    print(f"\n[1] Metaduomenys:")
-    print(f"    Trukmė : {info['trukme_sek']:.2f} s")
-    print(f"    sfreq  : {info['sfreq']} Hz")
+            results = analyze_eeg_clinical(
+                target_file,
+                measure_type=MeasureType.RESTING_EYES_CLOSED,
+            )
 
-    print(f"\n[2] Dažnių juostų metrikos:")
-    header = f"{'Juosta':<7} | {'Galia (mokslinė)':<16} | {'Santykinė %':<11} | {'Juosta':<22} | {'Vid. Amp.':<12} | {'Nuokrypis':<12} | {'Max Amp.'}"
-    print(header)
-    print("-" * len(header))
+            if not results:
+                print("Nepavyko paskaičiuoti metrikų.")
+                return
+        else:
+            with get_db() as db:
+                object_name = get_object_storage_key_by_job_id(db, analysis_job_id)
 
-    for band, s in results["rezultatai"].items():
-        bar = power_bar(s["santykine_galia_%"])
-        print(
-            f"{band:<7} | "
-            f"{s['galia']:<16.4e} | "
-            f"{s['santykine_galia_%']:>6.2f} %    | "
-            f"{bar:<22} | "
-            f"{s['vidurine_amplitude']:.4e}   | "
-            f"{s['nuokrypis']:.4e}   | "
-            f"{s['max_amplitude']:.4e}"
-        )
+                local_file_path = download_file(
+                    object_name,
+                    f"/tmp/data/job_{analysis_job_id}.edf",
+                )
+                target_file = str(local_file_path)
+
+                print(f"\n--- EEG Signalų Analizė: {target_file} ---")
+
+                results = analyze_eeg_clinical(
+                    target_file,
+                    measure_type=MeasureType.RESTING_EYES_CLOSED,
+                )
+
+                if not results:
+                    print("Nepavyko paskaičiuoti metrikų.")
+                    return
+
+                store_analysis_result(db, analysis_job_id, results)
+
+        info = results["informacija"]
+        print(f"\n[1] Metaduomenys:")
+        print(f"    Trukmė : {info['trukme_sek']:.2f} s")
+        print(f"    sfreq  : {info['sfreq']} Hz")
+
+        print(f"\n[2] Dažnių juostų metrikos:")
+        header = f"{'Juosta':<7} | {'Galia (mokslinė)':<16} | {'Santykinė %':<11} | {'Juosta':<22} | {'Vid. Amp.':<12} | {'Nuokrypis':<12} | {'Max Amp.'}"
+        print(header)
+        print("-" * len(header))
+
+        for band, s in results["rezultatai"].items():
+            bar = power_bar(s["santykine_galia_%"])
+            print(
+                f"{band:<7} | "
+                f"{s['galia']:<16.4e} | "
+                f"{s['santykine_galia_%']:>6.2f} %    | "
+                f"{bar:<22} | "
+                f"{s['vidurine_amplitude']:.4e}   | "
+                f"{s['nuokrypis']:.4e}   | "
+                f"{s['max_amplitude']:.4e}"
+            )
+    except Exception as e:
+        print(f"Klaida apdorojant analysis_job_id={analysis_job_id}: {e}")
+        raise
+
+    finally:
+        if local_file_path is not None and local_file_path.exists():
+            try:
+                local_file_path.unlink()
+                print(f"\nLaikinas failas ištrintas: {local_file_path}")
+            except Exception as e:
+                print(f"\nNepavyko ištrinti laikino failo {local_file_path}: {e}")
 
 
 if __name__ == '__main__':
