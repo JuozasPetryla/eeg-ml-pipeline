@@ -231,3 +231,66 @@ plt.title("Miego stadijų pasiskirstymas")
 plt.tight_layout()
 plt.savefig(f"{PLOTS_FOLDER}/stages.png")
 plt.close()
+
+# Plot EEG with stage color band
+sfreq = raw_eeg.info["sfreq"]
+data = raw_eeg.get_data()
+n_samples = data.shape[1]
+
+t = np.arange(n_samples) / sfreq / 3600.0
+epoch_len = 30.0
+samples_per_epoch = int(epoch_len * sfreq)
+
+n_epochs = len(y)
+assert n_epochs * samples_per_epoch <= n_samples
+
+stage_per_sample = np.repeat(y, samples_per_epoch)
+stage_per_sample = stage_per_sample[:n_samples]
+
+fig, (ax1, ax2, ax_stage) = plt.subplots(
+    3, 1, figsize=(15, 8), sharex=True,
+    gridspec_kw={"height_ratios": [1, 1, 0.5]},
+)
+
+ch_names = raw_eeg.ch_names
+fpz_idx = ch_names.index("Fpz-Cz") if "Fpz-Cz" in ch_names else 0
+ax1.plot(t, data[fpz_idx] * 1e6, color="blue", linewidth=0.8)
+ax1.set_ylabel("Fpz-Cz (µV)")
+ax1.set_title("EEG su miego stadijomis")
+ax1.grid(alpha=0.3)
+
+pf_idx = ch_names.index("Pf-Cz") if "Pf-Cz" in ch_names else 1
+ax2.plot(t, data[pf_idx] * 1e6, color="orange", linewidth=0.8)
+ax2.set_ylabel("Pf-Cz (µV)")
+ax2.grid(alpha=0.3)
+
+stage_list = list(stage_labels_lt.keys())
+colors = [stage_colors_lt[stage_labels_lt[s]] for s in stage_per_sample]
+
+ax_stage.imshow(
+    [stage_per_sample],
+    aspect="auto",
+    extent=[t[0], t[-1], 0, 1],
+    cmap=mcolors.ListedColormap(
+        [stage_colors_lt[stage_labels_lt[s]] for s in stage_list]
+    ),
+)
+
+handles = [
+    Patch(color=stage_colors_lt[stage_labels_lt[s]], label=stage_labels_lt[s])
+    for s in stage_list
+]
+ax_stage.legend(
+    handles=handles,
+    bbox_to_anchor=(1.05, 1),
+    loc="upper left"
+)
+
+ax_stage.set_yticks([])
+ax_stage.set_xlabel("Laikas (valandos)")
+ax_stage.set_title("Modelio prognozuotos miego stadijos")
+
+plt.tight_layout()
+plt.savefig(f"{PLOTS_FOLDER}/eeg_with_stages.png")
+plt.show()
+plt.close()
