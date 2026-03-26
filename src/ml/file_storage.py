@@ -48,3 +48,23 @@ def download_file(object_name: str, destination_path: str | Path) -> Path:
         raise RuntimeError(
             f"Failed to download '{object_name}' from bucket '{S3_BUCKET}': {e}"
         ) from e
+
+
+def upload_file(source_path: str | Path, object_name: str, content_type: str) -> str:
+    source_path = Path(source_path)
+
+    if not source_path.exists():
+        raise RuntimeError(f"File does not exist: {source_path}")
+
+    try:
+        minio_client.fput_object(
+            bucket_name=S3_BUCKET,
+            object_name=object_name,
+            file_path=str(source_path),
+            content_type=content_type,
+        )
+        return object_name
+    except S3Error as e:
+        raise RuntimeError(
+            f"Failed to upload '{source_path}' to bucket '{S3_BUCKET}': {e}"
+        ) from e

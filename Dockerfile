@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -U pip setuptools wheel
 RUN pip install --no-cache-dir .
 
 ENV PYTHONPATH=/app/src
-CMD ["sleep", "infinity"]
+CMD ["python", "-m", "ml.worker"]

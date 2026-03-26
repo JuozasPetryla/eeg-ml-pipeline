@@ -17,3 +17,17 @@ def get_object_storage_key_by_job_id(db: Session, analysis_job_id: int) -> str:
         raise ValueError(f"No EEG file found for analysis_job_id={analysis_job_id}")
 
     return object_storage_key
+
+
+def get_analysis_type_by_job_id(db: Session, analysis_job_id: int) -> str:
+    stmt = (
+        select(AnalysisJob.analysis_type)
+        .where(AnalysisJob.id == analysis_job_id)
+    )
+
+    analysis_type = db.execute(stmt).scalar_one_or_none()
+
+    if analysis_type is None:
+        raise ValueError(f"No analysis job found for analysis_job_id={analysis_job_id}")
+
+    return analysis_type

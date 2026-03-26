@@ -544,10 +544,63 @@ def power_bar(pct: float, width: int = 20) -> str:
     return "█" * filled + "░" * (width - filled)
 
 import argparse
-from ml.result_writer import store_analysis_result
+from ml.result_writer import (
+    mark_analysis_job_failed,
+    mark_analysis_job_started,
+    store_analysis_result,
+)
 from ml.db import get_db
 from ml.file_storage import download_file
 from ml.job_repository import get_object_storage_key_by_job_id
+
+MODEL_VERSION = "statistics-v1"
+
+
+def process_analysis_job(analysis_job_id: int) -> dict:
+    local_file_path = None
+
+    try:
+        with get_db() as db:
+            mark_analysis_job_started(db, analysis_job_id, model_version=MODEL_VERSION)
+
+            object_name = get_object_storage_key_by_job_id(db, analysis_job_id)
+
+            local_file_path = download_file(
+                object_name,
+                f"/tmp/data/job_{analysis_job_id}.edf",
+            )
+            target_file = str(local_file_path)
+
+            print(f"\n--- EEG Signalų Analizė: {target_file} ---")
+
+            results = analyze_eeg_clinical(
+                target_file,
+                measure_type=MeasureType.RESTING_EYES_CLOSED,
+            )
+
+            if not results:
+                raise RuntimeError("Nepavyko paskaičiuoti metrikų.")
+
+            store_analysis_result(
+                db,
+                analysis_job_id,
+                results,
+                model_version=MODEL_VERSION,
+            )
+
+            return results
+    except Exception as e:
+        with get_db() as db:
+            mark_analysis_job_failed(db, analysis_job_id, str(e))
+        raise
+    finally:
+        if local_file_path is not None and local_file_path.exists():
+            try:
+                local_file_path.unlink()
+                print(f"\nLaikinas failas ištrintas: {local_file_path}")
+            except Exception as e:
+                print(f"\nNepavyko ištrinti laikino failo {local_file_path}: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -556,7 +609,6 @@ def main():
     args = parser.parse_args()
 
     analysis_job_id = 1 if not args.job_id else args.job_id
-    local_file_path = None
     results = None
 
 
@@ -574,27 +626,7 @@ def main():
                 print("Nepavyko paskaičiuoti metrikų.")
                 return
         else:
-            with get_db() as db:
-                object_name = get_object_storage_key_by_job_id(db, analysis_job_id)
-
-                local_file_path = download_file(
-                    object_name,
-                    f"/tmp/data/job_{analysis_job_id}.edf",
-                )
-                target_file = str(local_file_path)
-
-                print(f"\n--- EEG Signalų Analizė: {target_file} ---")
-
-                results = analyze_eeg_clinical(
-                    target_file,
-                    measure_type=MeasureType.RESTING_EYES_CLOSED,
-                )
-
-                if not results:
-                    print("Nepavyko paskaičiuoti metrikų.")
-                    return
-
-                store_analysis_result(db, analysis_job_id, results)
+            results = process_analysis_job(analysis_job_id)
 
         info = results["informacija"]
         print(f"\n[1] Metaduomenys:")
@@ -620,15 +652,6 @@ def main():
     except Exception as e:
         print(f"Klaida apdorojant analysis_job_id={analysis_job_id}: {e}")
         raise
-
-    finally:
-        if local_file_path is not None and local_file_path.exists():
-            try:
-                local_file_path.unlink()
-                print(f"\nLaikinas failas ištrintas: {local_file_path}")
-            except Exception as e:
-                print(f"\nNepavyko ištrinti laikino failo {local_file_path}: {e}")
-
 
 if __name__ == '__main__':
     main()

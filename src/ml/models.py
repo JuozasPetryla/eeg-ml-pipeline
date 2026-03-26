@@ -31,6 +31,11 @@ class AnalysisJob(Base):
         ForeignKey("eeg_files.id", ondelete="CASCADE"),
         nullable=False,
     )
+    analysis_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="day",
+    )
     status: Mapped[str] = mapped_column(
         String(30),
         nullable=False,
