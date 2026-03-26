@@ -1,7 +1,9 @@
 import os
 import time
 
+import psycopg
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from ml.db import get_db
 from ml.job_repository import get_analysis_type_by_job_id
@@ -27,7 +29,18 @@ def main() -> None:
     print("EEG ML worker started")
 
     while True:
-        job_id = get_next_queued_job_id()
+        try:
+            job_id = get_next_queued_job_id()
+        except (OperationalError, ProgrammingError) as exc:
+            # Docker can start this worker before Postgres schema initialization finishes.
+            if isinstance(getattr(exc, "orig", None), psycopg.errors.UndefinedTable):
+                print("analysis_jobs is not available yet; waiting for migrations to finish")
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+
+            print(f"Database is not ready yet: {exc}")
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
 
         if job_id is None:
             time.sleep(POLL_INTERVAL_SECONDS)
