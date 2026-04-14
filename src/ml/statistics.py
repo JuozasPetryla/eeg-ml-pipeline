@@ -63,7 +63,6 @@ PASTABOS:
   • Reikšmių formato: (mean_%, std_%) santykinės galios procentais.
 """
 
-from ml.job_repository import get_object_storage_key_by_job_id
 import mne
 import numpy as np
 import os
@@ -475,7 +474,7 @@ def analyze_eeg_clinical(
         # 3. Dažnių juostų išskyrimas (PSD)
         spectrum = raw.compute_psd(method='welch', fmin=0.5, fmax=45.0, verbose=False)
         psds, freqs = spectrum.get_data(return_freqs=True)
-        avg_psd = psds.mean(axis=0)  # Vidurkis per visus kanalus
+        avg_psd = psds.mean(axis=0) * 1e12  # V²/Hz → µV²/Hz
 
         bands = {
             'Delta': (0.5, 4),
@@ -506,9 +505,9 @@ def analyze_eeg_clinical(
             # Santykinė galia (%)
             relative_power = (power / total_power * 100) if total_power > 0 else 0.0
 
-            # Amplitudės statistika iš laiko srities
+            # Amplitudės statistika iš laiko srities (V → µV)
             band_raw  = raw.copy().filter(l_freq=fmin, h_freq=fmax, verbose=False)
-            band_data = band_raw.get_data()
+            band_data = band_raw.get_data() * 1e6
 
             # Z-balas: kiek standartinių nuokrypių nuo normatyvinės populiacijos vidurkio
             norm_mean, norm_std = norm_age[band]
@@ -544,19 +543,19 @@ def power_bar(pct: float, width: int = 20) -> str:
     return "█" * filled + "░" * (width - filled)
 
 import argparse
-from ml.result_writer import (
-    mark_analysis_job_failed,
-    mark_analysis_job_started,
-    store_analysis_result,
-)
-from ml.db import get_db
-from ml.file_storage import download_file
-from ml.job_repository import get_object_storage_key_by_job_id
 
 MODEL_VERSION = "statistics-v1"
 
 
 def process_analysis_job(analysis_job_id: int) -> dict:
+    from ml.result_writer import (
+        mark_analysis_job_failed,
+        mark_analysis_job_started,
+        store_analysis_result,
+    )
+    from ml.db import get_db
+    from ml.file_storage import download_file
+    from ml.job_repository import get_object_storage_key_by_job_id
     local_file_path = None
 
     try:
@@ -634,7 +633,7 @@ def main():
         print(f"    sfreq  : {info['sfreq']} Hz")
 
         print(f"\n[2] Dažnių juostų metrikos:")
-        header = f"{'Juosta':<7} | {'Galia (mokslinė)':<16} | {'Santykinė %':<11} | {'Juosta':<22} | {'Vid. Amp.':<12} | {'Nuokrypis':<12} | {'Max Amp.'}"
+        header = f"{'Juosta':<7} | {'Galia (µV²)':<16} | {'Santykinė %':<11} | {'Juosta':<22} | {'Vid. Amp. (µV)':<16} | {'Nuokrypis':<12} | {'Max Amp. (µV)'}"
         print(header)
         print("-" * len(header))
 
@@ -642,12 +641,12 @@ def main():
             bar = power_bar(s["santykine_galia_%"])
             print(
                 f"{band:<7} | "
-                f"{s['galia']:<16.4e} | "
+                f"{s['galia']:<16.4f} | "
                 f"{s['santykine_galia_%']:>6.2f} %    | "
                 f"{bar:<22} | "
-                f"{s['vidurine_amplitude']:.4e}   | "
-                f"{s['nuokrypis']:.4e}   | "
-                f"{s['max_amplitude']:.4e}"
+                f"{s['vidurine_amplitude']:<16.4f} | "
+                f"{s['nuokrypis']:<12.4f} | "
+                f"{s['max_amplitude']:.4f}"
             )
     except Exception as e:
         print(f"Klaida apdorojant analysis_job_id={analysis_job_id}: {e}")
