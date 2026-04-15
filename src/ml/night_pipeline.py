@@ -181,38 +181,49 @@ def process_night_analysis_job(analysis_job_id: int) -> dict[str, str]:
         x_new, time_hours = load_subject(local_file_path)
         y = MODEL.predict(x_new)
 
+        raw = mne.io.read_raw_edf(local_file_path, preload=True, verbose=False)
+        raw_eeg = raw.copy().pick_types(eeg=True, meg=False, stim=False)
+        data = raw_eeg.get_data()
+        ch_names = raw_eeg.ch_names
+        sfreq = raw_eeg.info["sfreq"]
+        epoch_samples = int(30.0 * sfreq)
+
+        # Downsample: take mean amplitude per epoch per channel
+        fpz_idx = ch_names.index("Fpz-Cz") if "Fpz-Cz" in ch_names else 0
+        pf_idx  = ch_names.index("Pf-Cz")  if "Pf-Cz"  in ch_names else 1
+        n_epochs = len(y)
+
+        fpz_downsampled = [
+            float(np.mean(data[fpz_idx, i*epoch_samples:(i+1)*epoch_samples]) * 1e6)
+            for i in range(n_epochs)
+        ]
+        pf_downsampled = [
+            float(np.mean(data[pf_idx, i*epoch_samples:(i+1)*epoch_samples]) * 1e6)
+            for i in range(n_epochs)
+        ]
+
         scatter_path = output_dir / "hypnogram_scatter.png"
         classic_path = output_dir / "hypnogram_classic.png"
         heatmap_path = output_dir / "hypnogram_heatmap.png"
         stages_path = output_dir / "stages.png"
 
-        save_scatter(y, time_hours, scatter_path)
-        save_classic(y, time_hours, classic_path)
-        save_heatmap(y, time_hours, heatmap_path)
-        save_stage_distribution(y, stages_path)
+        # save_scatter(y, time_hours, scatter_path)
+        # save_classic(y, time_hours, classic_path)
+        # save_heatmap(y, time_hours, heatmap_path)
+        # save_stage_distribution(y, stages_path)
 
         ensure_bucket_exists()
         result_payload = {
-            "scatter": upload_file(
-                scatter_path,
-                f"results/night/{analysis_job_id}/hypnogram_scatter.png",
-                "image/png",
-            ),
-            "classic": upload_file(
-                classic_path,
-                f"results/night/{analysis_job_id}/hypnogram_classic.png",
-                "image/png",
-            ),
-            "heatmap": upload_file(
-                heatmap_path,
-                f"results/night/{analysis_job_id}/hypnogram_heatmap.png",
-                "image/png",
-            ),
-            "stages": upload_file(
-                stages_path,
-                f"results/night/{analysis_job_id}/stages.png",
-                "image/png",
-            ),
+            "type": "ml_sleep",          # for frontend to know how to display
+            "time_hours": time_hours.tolist(),
+            "stages": y.tolist(),  
+            "stage_percentages": {       
+                int(code): float(np.sum(y == code) / len(y) * 100)
+                for code in np.unique(y)
+            }, 
+            "eeg_fpz": fpz_downsampled,   
+            "eeg_pf":  pf_downsampled,
+            "eeg_ch_names": [ch_names[fpz_idx], ch_names[pf_idx]],  
         }
 
         with get_db() as db:
