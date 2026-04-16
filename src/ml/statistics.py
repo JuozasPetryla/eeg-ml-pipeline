@@ -550,7 +550,6 @@ MODEL_VERSION = "statistics-v1"
 def process_analysis_job(analysis_job_id: int) -> dict:
     from ml.result_writer import (
         mark_analysis_job_failed,
-        mark_analysis_job_started,
         store_analysis_result,
     )
     from ml.db import get_db
@@ -560,8 +559,6 @@ def process_analysis_job(analysis_job_id: int) -> dict:
 
     try:
         with get_db() as db:
-            mark_analysis_job_started(db, analysis_job_id, model_version=MODEL_VERSION)
-
             object_name = get_object_storage_key_by_job_id(db, analysis_job_id)
 
             local_file_path = download_file(

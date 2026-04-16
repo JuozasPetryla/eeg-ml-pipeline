@@ -16,7 +16,6 @@ from ml.file_storage import download_file, ensure_bucket_exists, upload_file
 from ml.job_repository import get_object_storage_key_by_job_id
 from ml.result_writer import (
     mark_analysis_job_failed,
-    mark_analysis_job_started,
     store_analysis_result,
 )
 
@@ -48,6 +47,8 @@ STAGE_COLORS_LT = {
 MODEL_DIR = Path(__file__).resolve().parent
 SCALER = joblib.load(MODEL_DIR / "scaler.pkl")
 MODEL = joblib.load(MODEL_DIR / "model.pkl")
+
+ASSET_CONTENT_TYPE = "image/png"
 
 
 def extract_band_powers(epoch: np.ndarray, sfreq: float) -> list[float]:
@@ -162,13 +163,78 @@ def save_stage_distribution(y: np.ndarray, output_path: Path) -> None:
     plt.close()
 
 
+def save_eeg_with_stages(raw_eeg: mne.io.BaseRaw, y: np.ndarray, output_path: Path) -> list[str]:
+    sfreq = raw_eeg.info["sfreq"]
+    data = raw_eeg.get_data()
+    n_samples = data.shape[1]
+
+    t = np.arange(n_samples) / sfreq / 3600.0
+    epoch_len = 30.0
+    samples_per_epoch = int(epoch_len * sfreq)
+    n_epochs = len(y)
+
+    if n_epochs * samples_per_epoch > n_samples:
+        raise RuntimeError("Predicted epochs exceed available EEG samples")
+
+    stage_per_sample = np.repeat(y, samples_per_epoch)[:n_samples]
+
+    fig, (ax1, ax2, ax_stage) = plt.subplots(
+        3,
+        1,
+        figsize=(15, 8),
+        sharex=True,
+        gridspec_kw={"height_ratios": [1, 1, 0.5]},
+    )
+
+    ch_names = raw_eeg.ch_names
+    fpz_idx = ch_names.index("Fpz-Cz") if "Fpz-Cz" in ch_names else 0
+    pf_idx = ch_names.index("Pf-Cz") if "Pf-Cz" in ch_names else min(1, len(ch_names) - 1)
+
+    ax1.plot(t, data[fpz_idx] * 1e6, color="blue", linewidth=0.8)
+    ax1.set_ylabel(f"{ch_names[fpz_idx]} (µV)")
+    ax1.set_title("EEG su miego stadijomis")
+    ax1.grid(alpha=0.3)
+
+    ax2.plot(t, data[pf_idx] * 1e6, color="orange", linewidth=0.8)
+    ax2.set_ylabel(f"{ch_names[pf_idx]} (µV)")
+    ax2.grid(alpha=0.3)
+
+    stage_list = list(stage_labels_to_codes().keys())
+    ax_stage.imshow(
+        [stage_per_sample],
+        aspect="auto",
+        extent=[t[0], t[-1], 0, 1],
+        cmap=mcolors.ListedColormap(
+            [STAGE_COLORS_LT[STAGE_NAMES_LT[s]] for s in stage_list]
+        ),
+    )
+
+    handles = [
+        Patch(color=STAGE_COLORS_LT[STAGE_NAMES_LT[s]], label=STAGE_NAMES_LT[s])
+        for s in stage_list
+    ]
+    ax_stage.legend(handles=handles, bbox_to_anchor=(1.05, 1), loc="upper left")
+    ax_stage.set_yticks([])
+    ax_stage.set_xlabel("Laikas (valandos)")
+    ax_stage.set_title("Modelio prognozuotos miego stadijos")
+
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+    return [ch_names[fpz_idx], ch_names[pf_idx]]
+
+
+def stage_labels_to_codes() -> dict[int, str]:
+    return {code: label for code, label in STAGE_NAMES_LT.items()}
+
+
 def process_night_analysis_job(analysis_job_id: int) -> dict[str, str]:
     local_file_path = None
     output_dir = None
 
     try:
         with get_db() as db:
-            mark_analysis_job_started(db, analysis_job_id, model_version=MODEL_VERSION)
             object_name = get_object_storage_key_by_job_id(db, analysis_job_id)
 
         local_file_path = download_file(
@@ -183,48 +249,37 @@ def process_night_analysis_job(analysis_job_id: int) -> dict[str, str]:
 
         raw = mne.io.read_raw_edf(local_file_path, preload=True, verbose=False)
         raw_eeg = raw.copy().pick_types(eeg=True, meg=False, stim=False)
-        data = raw_eeg.get_data()
-        ch_names = raw_eeg.ch_names
-        sfreq = raw_eeg.info["sfreq"]
-        epoch_samples = int(30.0 * sfreq)
-
-        # Downsample: take mean amplitude per epoch per channel
-        fpz_idx = ch_names.index("Fpz-Cz") if "Fpz-Cz" in ch_names else 0
-        pf_idx  = ch_names.index("Pf-Cz")  if "Pf-Cz"  in ch_names else 1
-        n_epochs = len(y)
-
-        fpz_downsampled = [
-            float(np.mean(data[fpz_idx, i*epoch_samples:(i+1)*epoch_samples]) * 1e6)
-            for i in range(n_epochs)
-        ]
-        pf_downsampled = [
-            float(np.mean(data[pf_idx, i*epoch_samples:(i+1)*epoch_samples]) * 1e6)
-            for i in range(n_epochs)
-        ]
 
         scatter_path = output_dir / "hypnogram_scatter.png"
         classic_path = output_dir / "hypnogram_classic.png"
         heatmap_path = output_dir / "hypnogram_heatmap.png"
         stages_path = output_dir / "stages.png"
+        eeg_with_stages_path = output_dir / "eeg_with_stages.png"
 
-        # save_scatter(y, time_hours, scatter_path)
-        # save_classic(y, time_hours, classic_path)
-        # save_heatmap(y, time_hours, heatmap_path)
-        # save_stage_distribution(y, stages_path)
+        save_scatter(y, time_hours, scatter_path)
+        save_classic(y, time_hours, classic_path)
+        save_heatmap(y, time_hours, heatmap_path)
+        save_stage_distribution(y, stages_path)
+        save_eeg_with_stages(raw_eeg, y, eeg_with_stages_path)
 
         ensure_bucket_exists()
-        result_payload = {
-            "type": "ml_sleep",          # for frontend to know how to display
-            "time_hours": time_hours.tolist(),
-            "stages": y.tolist(),  
-            "stage_percentages": {       
-                int(code): float(np.sum(y == code) / len(y) * 100)
-                for code in np.unique(y)
-            }, 
-            "eeg_fpz": fpz_downsampled,   
-            "eeg_pf":  pf_downsampled,
-            "eeg_ch_names": [ch_names[fpz_idx], ch_names[pf_idx]],  
+        asset_paths = {
+            "scatter": scatter_path,
+            "classic": classic_path,
+            "heatmap": heatmap_path,
+            "stages": stages_path,
+            "eeg_with_stages": eeg_with_stages_path,
         }
+        uploaded_assets = {}
+        for asset_name, asset_path in asset_paths.items():
+            object_key = f"analysis-results/{analysis_job_id}/{asset_path.name}"
+            uploaded_assets[asset_name] = upload_file(
+                asset_path,
+                object_key,
+                ASSET_CONTENT_TYPE,
+            )
+
+        result_payload = uploaded_assets
 
         with get_db() as db:
             store_analysis_result(
