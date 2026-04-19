@@ -63,7 +63,14 @@ def extract_band_powers(epoch: np.ndarray, sfreq: float) -> list[float]:
 
 def load_subject(psg_path: Path):
     raw = mne.io.read_raw_edf(psg_path, preload=True, verbose=False)
-    raw_eeg = raw.copy().pick_types(eeg=True, meg=False, stim=False)
+    
+    # The model expects 28 features (7 channels * 4 frequency bands).
+    # We pick only the first 7 EEG channels found in the file.
+    eeg_picks = mne.pick_types(raw.info, eeg=True, meg=False, stim=False)
+    if len(eeg_picks) > 7:
+        eeg_picks = eeg_picks[:7]
+    
+    raw_eeg = raw.copy().pick(eeg_picks)
 
     sfreq = raw_eeg.info["sfreq"]
     epoch_len = 30.0
@@ -229,6 +236,11 @@ def stage_labels_to_codes() -> dict[int, str]:
     return {code: label for code, label in STAGE_NAMES_LT.items()}
 
 
+from ml.statistics import (
+    MeasureType,
+    calculate_stats_from_data,
+)
+
 def process_night_analysis_job(analysis_job_id: int) -> dict[str, str]:
     local_file_path = None
     output_dir = None
@@ -248,7 +260,73 @@ def process_night_analysis_job(analysis_job_id: int) -> dict[str, str]:
         y = MODEL.predict(x_new)
 
         raw = mne.io.read_raw_edf(local_file_path, preload=True, verbose=False)
-        raw_eeg = raw.copy().pick_types(eeg=True, meg=False, stim=False)
+        # Fix: Pick only the first 7 EEG channels to match the 28 features expected by the model
+        eeg_picks = mne.pick_types(raw.info, eeg=True, meg=False, stim=False)
+        if len(eeg_picks) > 7:
+            eeg_picks = eeg_picks[:7]
+        raw_eeg = raw.copy().pick(eeg_picks)
+
+        # --- Stage-specific Statistics ---
+        sfreq = raw_eeg.info["sfreq"]
+        epoch_len = 30.0
+        samples_per_epoch = int(epoch_len * sfreq)
+        
+        # We need a pristine copy of the data for statistics
+        stats_raw = raw.copy()
+        
+        # Select central/parietal channels which are best for sleep staging and have fewer eye/muscle artifacts
+        ch_names = stats_raw.ch_names
+        target_chs = [ch for ch in ch_names if any(x in ch.upper() for x in ['C3', 'C4', 'P3', 'P4', 'CZ', 'PZ', 'O1', 'O2'])]
+        
+        # If we couldn't find central channels, fall back to whatever EEG channels are available, but avoid frontal
+        if not target_chs:
+            eeg_picks = mne.pick_types(stats_raw.info, eeg=True, meg=False, stim=False)
+            target_chs = [stats_raw.ch_names[i] for i in eeg_picks]
+            
+        stats_raw.pick(target_chs)
+
+        # Filter data specifically for statistics to remove DC offset and slow drift
+        # Using 1.0 Hz highpass is more aggressive against sweat/movement artifacts than 0.5 Hz
+        stats_raw.load_data() # Load before filtering
+        sfreq = stats_raw.info["sfreq"]
+        h_freq = min(49.0, sfreq / 2.0 - 0.5)
+        stats_raw.filter(l_freq=1.0, h_freq=h_freq, verbose=False)
+        if sfreq > 100:
+             stats_raw.notch_filter(freqs=np.arange(50, 51), verbose=False)
+        stats_data = stats_raw.get_data()
+        
+        stage_stats = {}
+        # Mapping model stages to MeasureType
+        stage_to_measure = {
+            0: MeasureType.RESTING_EYES_CLOSED,
+            1: MeasureType.LIGHT_SLEEP_N1,
+            2: MeasureType.LIGHT_SLEEP_N1, # Mapping N2 to N1 as a proxy if N2 norm missing
+            3: MeasureType.DEEP_SLEEP_N3,
+            4: MeasureType.RESTING_EYES_CLOSED, # Mapping REM to Wake as a proxy for norms
+        }
+
+        for stage_code, measure in stage_to_measure.items():
+            stage_name = STAGE_NAMES_LT[stage_code]
+            # Find indices of epochs with this stage
+            epoch_indices = np.where(y == stage_code)[0]
+            
+            if len(epoch_indices) > 0:
+                # Extract and concatenate data for these epochs
+                stage_data_list = []
+                for idx in epoch_indices:
+                    start = int(idx * samples_per_epoch)
+                    end = int(start + samples_per_epoch)
+                    if end <= stats_data.shape[1]:
+                        stage_data_list.append(stats_data[:, start:end])
+                
+                if stage_data_list:
+                    stage_data_combined = np.concatenate(stage_data_list, axis=1)
+                    stats = calculate_stats_from_data(
+                        stage_data_combined, 
+                        sfreq, 
+                        measure_type=measure
+                    )
+                    stage_stats[stage_name] = stats
 
         scatter_path = output_dir / "hypnogram_scatter.png"
         classic_path = output_dir / "hypnogram_classic.png"
@@ -279,7 +357,10 @@ def process_night_analysis_job(analysis_job_id: int) -> dict[str, str]:
                 ASSET_CONTENT_TYPE,
             )
 
-        result_payload = uploaded_assets
+        result_payload = {
+            **uploaded_assets,
+            "stage_stats": stage_stats
+        }
 
         with get_db() as db:
             store_analysis_result(

@@ -447,6 +447,112 @@ NORMATIVE_DB: Dict[str, Dict[str, Dict[str, Tuple[float, float]]]] = {
 }
 
 
+def compute_channel_band_powers(
+    data: np.ndarray,
+    ch_names: list,
+    sfreq: float,
+) -> Dict[str, Dict[str, float]]:
+    """Compute relative band power (%) for each EEG channel (for topographic map)."""
+    from scipy.signal import welch as _welch
+
+    bands = {
+        'Delta': (1.0, 4.0),
+        'Theta': (4.0, 8.0),
+        'Alpha': (8.0, 13.0),
+        'Beta':  (13.0, 30.0),
+        'Gamma': (30.0, 45.0),
+    }
+
+    result: Dict[str, Dict[str, float]] = {}
+
+    for ch_idx, ch_name in enumerate(ch_names):
+        ch_data = data[ch_idx]
+        f, psd = _welch(ch_data, sfreq, nperseg=min(1024, len(ch_data)))
+        psd = psd * 1e12  # V²/Hz → µV²/Hz
+
+        total_power = sum(
+            simpson(y=psd[np.logical_and(f >= lo, f <= hi)],
+                    x=f[np.logical_and(f >= lo, f <= hi)])
+            for lo, hi in bands.values()
+        )
+
+        ch_bands: Dict[str, float] = {}
+        for band, (fmin, fmax) in bands.items():
+            mask = np.logical_and(f >= fmin, f <= fmax)
+            power = simpson(y=psd[mask], x=f[mask])
+            relative = (power / total_power * 100) if total_power > 0 else 0.0
+            ch_bands[band] = round(float(relative), 2)
+
+        # Store with uppercase name; frontend normalises further (strips prefix/suffix)
+        result[ch_name.strip().upper()] = ch_bands
+
+    return result
+
+
+def calculate_stats_from_data(
+    data: np.ndarray,
+    sfreq: float,
+    measure_type: MeasureType = MeasureType.RESTING_EYES_CLOSED,
+    age_group: AgeGroup = AgeGroup.YOUNG_ADULT_18_30,
+) -> Dict[str, Any]:
+    """
+    Core logic to calculate EEG statistics from a raw numpy array (channels, samples).
+    """
+    # Dažnių juostų išskyrimas (PSD)
+    # Average across channels
+    psds = []
+    freqs = None
+    
+    # Welch for each channel
+    for ch in data:
+        f, psd = welch(ch, sfreq, nperseg=min(1024, len(ch)))
+        psds.append(psd)
+        freqs = f
+    
+    avg_psd = np.mean(psds, axis=0) * 1e12  # V²/Hz → µV²/Hz
+
+    bands = {
+        'Delta': (1.0, 4),
+        'Theta': (4,   8),
+        'Alpha': (8,  13),
+        'Beta':  (13, 30),
+        'Gamma': (30, 45),
+    }
+
+    total_power = sum(
+        simpson(y=avg_psd[np.logical_and(freqs >= lo, freqs <= hi)],
+                x=freqs[np.logical_and(freqs >= lo, freqs <= hi)])
+        for lo, hi in bands.values()
+    )
+
+    norm_condition = NORMATIVE_DB[measure_type.value]
+    norm_age = norm_condition.get(age_group.value, norm_condition["18-30"])
+
+    band_results = {}
+    for band, (fmin, fmax) in bands.items():
+        idx = np.logical_and(freqs >= fmin, freqs <= fmax)
+        power = simpson(y=avg_psd[idx], x=freqs[idx])
+        relative_power = (power / total_power * 100) if total_power > 0 else 0.0
+        
+        norm_mean, norm_std = norm_age[band]
+        z_score = (relative_power - norm_mean) / norm_std if norm_std > 0 else 0.0
+
+        # Amplitudės statistika iš laiko srities (V → µV)
+        # Using mne.filter.filter_data directly on the numpy array
+        band_data = mne.filter.filter_data(data, sfreq=sfreq, l_freq=fmin, h_freq=fmax, verbose=False) * 1e6
+        vid_amp = float(np.mean(np.abs(band_data)))
+        max_amp = float(np.max(np.abs(band_data)))
+
+        band_results[band] = {
+            "galia":              float(power),
+            "santykine_galia_%":  round(float(relative_power), 2),
+            "vidurine_amplitude": vid_amp,
+            "nuokrypis":          float(z_score),
+            "max_amplitude":      max_amp,
+        }
+    return band_results
+
+
 def analyze_eeg_clinical(
     file_path: str,
     measure_type: MeasureType = MeasureType.RESTING_EYES_CLOSED,
@@ -454,87 +560,53 @@ def analyze_eeg_clinical(
 ) -> Dict[str, Any]:
     """
     Reads an EEG file, filters noise, extracts frequency bands.
-
-    The 'nuokrypis' field now contains a Z-score:
-        Z = (patient_relative_power_% - norm_mean_%) / norm_std_%
-    Interpretation: |Z| ≤ 1 — norma; |Z| ≤ 2 — paribys; |Z| > 2 — kliniškai reikšminga.
     """
     if not os.path.exists(file_path):
         print(f"Klaida: Failas {file_path} nerastas.")
         return {}
 
     try:
-        # 1. Load the raw data
         raw = mne.io.read_raw(file_path, preload=True, verbose=False)
+        sfreq = raw.info['sfreq']
 
-        # 2. Triukšmo filtravimas (Noise Filtering)
-        raw.filter(l_freq=0.5, h_freq=50.0, verbose=False)
-        raw.notch_filter(freqs=np.arange(50, 51), verbose=False)
+        # Pick all EEG channels for per-channel topographic map
+        eeg_picks = mne.pick_types(raw.info, eeg=True, meg=False, stim=False)
+        if len(eeg_picks) > 0:
+            raw.pick([raw.ch_names[i] for i in eeg_picks])
 
-        # 3. Dažnių juostų išskyrimas (PSD)
-        spectrum = raw.compute_psd(method='welch', fmin=0.5, fmax=45.0, verbose=False)
-        psds, freqs = spectrum.get_data(return_freqs=True)
-        avg_psd = psds.mean(axis=0) * 1e12  # V²/Hz → µV²/Hz
+        h_freq = min(49.0, sfreq / 2.0 - 0.5)
+        # 1.0 Hz highpass is much safer for automated analysis of long recordings
+        raw.filter(l_freq=1.0, h_freq=h_freq, verbose=False)
+        if sfreq > 100:
+            raw.notch_filter(freqs=np.arange(50, 51), verbose=False)
 
-        bands = {
-            'Delta': (0.5, 4),
-            'Theta': (4,   8),
-            'Alpha': (8,  13),
-            'Beta':  (13, 30),
-            'Gamma': (30, 45),
-        }
+        all_ch_names = raw.ch_names
+        all_data = raw.get_data()
 
-        # ── Bendra galia (visų juostų suma) — santykinei galiai skaičiuoti ──
-        total_power = sum(
-            simpson(y=avg_psd[np.logical_and(freqs >= lo, freqs <= hi)],
-                    x=freqs[np.logical_and(freqs >= lo, freqs <= hi)])
-            for lo, hi in bands.values()
-        )
+        # Use all EEG channels for both the summary table and the topomap so the
+        # table values represent the spatial average of what the map displays.
+        band_results = calculate_stats_from_data(all_data, sfreq, measure_type, age_group)
 
-        # Normatyvinės reikšmės pagal pasirinktą sąlygą ir amžiaus grupę
-        norm_condition = NORMATIVE_DB[measure_type.value]
-        norm_age = norm_condition.get(age_group.value, norm_condition["18-30"])
-
-        band_results = {}
-        for band, (fmin, fmax) in bands.items():
-            idx = np.logical_and(freqs >= fmin, freqs <= fmax)
-
-            # Absoliuti galia
-            power = simpson(y=avg_psd[idx], x=freqs[idx])
-
-            # Santykinė galia (%)
-            relative_power = (power / total_power * 100) if total_power > 0 else 0.0
-
-            # Amplitudės statistika iš laiko srities (V → µV)
-            band_raw  = raw.copy().filter(l_freq=fmin, h_freq=fmax, verbose=False)
-            band_data = band_raw.get_data() * 1e6
-
-            # Z-balas: kiek standartinių nuokrypių nuo normatyvinės populiacijos vidurkio
-            norm_mean, norm_std = norm_age[band]
-            z_score = (relative_power - norm_mean) / norm_std if norm_std > 0 else 0.0
-
-            band_results[band] = {
-                "galia":              float(power),
-                "santykine_galia_%":  round(float(relative_power), 2),
-                "vidurine_amplitude": float(np.mean(np.abs(band_data))),
-                "nuokrypis":          float(z_score),
-                "max_amplitude":      float(np.max(np.abs(band_data))),
-            }
+        # Per-channel powers for the topographic scalp map
+        kanalu_galia = compute_channel_band_powers(all_data, all_ch_names, sfreq)
 
         analysis = {
             "informacija": {
                 "failas":      file_path,
                 "trukme_sek":  raw.times[-1],
-                "sfreq":       raw.info['sfreq'],
+                "sfreq":       sfreq,
             },
             "rezultatai": band_results,
+            "kanalu_galia": kanalu_galia,
         }
 
         return analysis
-
     except Exception as e:
         print(f"Klaida: {e}")
         return {}
+
+
+from scipy.signal import welch
 
 
 def power_bar(pct: float, width: int = 20) -> str:
