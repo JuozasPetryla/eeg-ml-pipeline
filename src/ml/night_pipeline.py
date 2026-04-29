@@ -12,7 +12,8 @@ from scipy.integrate import trapezoid
 from scipy.signal import welch
 
 from ml.db import get_db
-from ml.file_storage import download_file, ensure_bucket_exists, upload_file
+from typing import Any
+from ml.file_storage import download_file
 from ml.job_repository import get_object_storage_key_by_job_id
 from ml.result_writer import (
     mark_analysis_job_failed,
@@ -47,8 +48,6 @@ STAGE_COLORS_LT = {
 MODEL_DIR = Path(__file__).resolve().parent
 SCALER = joblib.load(MODEL_DIR / "scaler.pkl")
 MODEL = joblib.load(MODEL_DIR / "model.pkl")
-
-ASSET_CONTENT_TYPE = "image/png"
 
 
 def extract_band_powers(epoch: np.ndarray, sfreq: float) -> list[float]:
@@ -241,7 +240,7 @@ from ml.statistics import (
     calculate_stats_from_data,
 )
 
-def process_night_analysis_job(analysis_job_id: int) -> dict[str, str]:
+def process_night_analysis_job(analysis_job_id: int) -> dict[str, Any]:
     local_file_path = None
     output_dir = None
 
@@ -328,38 +327,33 @@ def process_night_analysis_job(analysis_job_id: int) -> dict[str, str]:
                     )
                     stage_stats[stage_name] = stats
 
-        scatter_path = output_dir / "hypnogram_scatter.png"
-        classic_path = output_dir / "hypnogram_classic.png"
-        heatmap_path = output_dir / "hypnogram_heatmap.png"
-        stages_path = output_dir / "stages.png"
-        eeg_with_stages_path = output_dir / "eeg_with_stages.png"
+        ch_names = raw_eeg.ch_names
+        fpz_idx = ch_names.index("Fpz-Cz") if "Fpz-Cz" in ch_names else 0
+        pf_idx = ch_names.index("Pf-Cz") if "Pf-Cz" in ch_names else min(1, len(ch_names) - 1)
+        n_epochs = len(y)
 
-        save_scatter(y, time_hours, scatter_path)
-        save_classic(y, time_hours, classic_path)
-        save_heatmap(y, time_hours, heatmap_path)
-        save_stage_distribution(y, stages_path)
-        save_eeg_with_stages(raw_eeg, y, eeg_with_stages_path)
-
-        ensure_bucket_exists()
-        asset_paths = {
-            "scatter": scatter_path,
-            "classic": classic_path,
-            "heatmap": heatmap_path,
-            "stages": stages_path,
-            "eeg_with_stages": eeg_with_stages_path,
-        }
-        uploaded_assets = {}
-        for asset_name, asset_path in asset_paths.items():
-            object_key = f"analysis-results/{analysis_job_id}/{asset_path.name}"
-            uploaded_assets[asset_name] = upload_file(
-                asset_path,
-                object_key,
-                ASSET_CONTENT_TYPE,
-            )
+        raw_data = raw_eeg.get_data()
+        eeg_fpz = [
+            float(np.mean(raw_data[fpz_idx, i * samples_per_epoch:(i + 1) * samples_per_epoch]) * 1e6)
+            for i in range(n_epochs)
+        ]
+        eeg_pf = [
+            float(np.mean(raw_data[pf_idx, i * samples_per_epoch:(i + 1) * samples_per_epoch]) * 1e6)
+            for i in range(n_epochs)
+        ]
 
         result_payload = {
-            **uploaded_assets,
-            "stage_stats": stage_stats
+            "type": "ml_sleep",
+            "time_hours": time_hours.tolist(),
+            "stages": y.tolist(),
+            "stage_percentages": {
+                int(code): float(np.sum(y == code) / len(y) * 100)
+                for code in range(5)
+            },
+            "eeg_fpz": eeg_fpz,
+            "eeg_pf": eeg_pf,
+            "eeg_ch_names": [ch_names[fpz_idx], ch_names[pf_idx]],
+            "stage_stats": stage_stats,
         }
 
         with get_db() as db:
