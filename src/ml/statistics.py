@@ -489,6 +489,169 @@ def compute_channel_band_powers(
     return result
 
 
+BAND_RANGES = {
+    'Delta': (1.0, 4.0),
+    'Theta': (4.0, 8.0),
+    'Alpha': (8.0, 13.0),
+    'Beta':  (13.0, 30.0),
+    'Gamma': (30.0, 45.0),
+}
+
+
+def compute_spectrogram(
+    data: np.ndarray,
+    sfreq: float,
+    max_freq: float = 45.0,
+    target_time_bins: int = 300,
+    target_freq_bins: int = 80,
+) -> Dict[str, Any]:
+    """
+    Compute average spectrogram (across channels) for display.
+
+    Returns time × frequency matrix in dB, with percentiles for color scaling.
+    Output downsampled to ~target_time_bins × target_freq_bins to keep payload small.
+    """
+    from scipy.signal import spectrogram as _spectrogram
+
+    avg_signal = np.mean(data, axis=0) * 1e6  # V → µV
+
+    nperseg = int(sfreq * 2)
+    nperseg = max(64, min(nperseg, len(avg_signal)))
+    noverlap = nperseg // 2
+
+    f, t, Sxx = _spectrogram(
+        avg_signal, fs=sfreq, nperseg=nperseg, noverlap=noverlap, scaling='density'
+    )
+
+    freq_mask = f <= max_freq
+    f = f[freq_mask]
+    Sxx = Sxx[freq_mask, :]
+
+    # Log scale (dB) with floor to avoid -inf
+    Sxx_db = 10.0 * np.log10(np.maximum(Sxx, 1e-12))
+
+    # Downsample time axis if needed
+    if Sxx_db.shape[1] > target_time_bins:
+        step = int(np.ceil(Sxx_db.shape[1] / target_time_bins))
+        Sxx_db = Sxx_db[:, ::step]
+        t = t[::step]
+
+    # Downsample frequency axis if needed
+    if Sxx_db.shape[0] > target_freq_bins:
+        step = int(np.ceil(Sxx_db.shape[0] / target_freq_bins))
+        Sxx_db = Sxx_db[::step, :]
+        f = f[::step]
+
+    vmin_db = float(np.percentile(Sxx_db, 2))
+    vmax_db = float(np.percentile(Sxx_db, 98))
+
+    return {
+        "freqs_hz": [round(float(v), 3) for v in f],
+        "times_sec": [round(float(v), 3) for v in t],
+        # power_db is rows=freq, cols=time → JSON list of rows
+        "power_db": [[round(float(v), 2) for v in row] for row in Sxx_db],
+        "vmin_db": round(vmin_db, 2),
+        "vmax_db": round(vmax_db, 2),
+    }
+
+
+def _sliding_band_powers(
+    signal: np.ndarray,
+    sfreq: float,
+    window_sec: float = 4.0,
+    step_sec: float = 2.0,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """Slide a Welch window across one channel; return time bins and per-band % power."""
+    from scipy.signal import welch as _welch
+
+    win = int(window_sec * sfreq)
+    step = int(step_sec * sfreq)
+    n_samples = len(signal)
+    if win >= n_samples:
+        win = n_samples
+        step = win
+
+    starts = np.arange(0, max(1, n_samples - win + 1), step)
+    times = (starts + win / 2) / sfreq
+
+    bands_out: Dict[str, list] = {b: [] for b in BAND_RANGES}
+
+    for s in starts:
+        segment = signal[s:s + win]
+        f, psd = _welch(segment, sfreq, nperseg=min(1024, len(segment)))
+        psd = psd * 1e12  # → µV²/Hz
+
+        band_powers = {}
+        for band, (lo, hi) in BAND_RANGES.items():
+            mask = np.logical_and(f >= lo, f <= hi)
+            if mask.any():
+                band_powers[band] = simpson(y=psd[mask], x=f[mask])
+            else:
+                band_powers[band] = 0.0
+
+        total = sum(band_powers.values())
+        for band, p in band_powers.items():
+            rel = (p / total * 100.0) if total > 0 else 0.0
+            bands_out[band].append(rel)
+
+    return times, {b: np.asarray(v) for b, v in bands_out.items()}
+
+
+def compute_band_power_timeseries(
+    data: np.ndarray,
+    sfreq: float,
+    target_bins: int = 300,
+) -> Dict[str, Any]:
+    """Average band power (%) across channels, per sliding window."""
+    avg = np.mean(data, axis=0)
+    times, bands = _sliding_band_powers(avg, sfreq)
+
+    if len(times) > target_bins:
+        step = int(np.ceil(len(times) / target_bins))
+        times = times[::step]
+        bands = {b: v[::step] for b, v in bands.items()}
+
+    return {
+        "times_sec": [round(float(t), 2) for t in times],
+        "bands": {
+            band: [round(float(v), 2) for v in vals]
+            for band, vals in bands.items()
+        },
+    }
+
+
+def compute_channel_band_timeseries(
+    data: np.ndarray,
+    ch_names: list,
+    sfreq: float,
+    target_bins: int = 60,
+) -> Dict[str, Any]:
+    """Per-channel, per-band relative power (%) over time. Aggressively downsampled."""
+    times_master = None
+    channels_out: Dict[str, Dict[str, list]] = {}
+
+    for ch_idx, ch_name in enumerate(ch_names):
+        times, bands = _sliding_band_powers(data[ch_idx], sfreq)
+
+        if len(times) > target_bins:
+            step = int(np.ceil(len(times) / target_bins))
+            times = times[::step]
+            bands = {b: v[::step] for b, v in bands.items()}
+
+        if times_master is None:
+            times_master = times
+
+        channels_out[ch_name.strip().upper()] = {
+            band: [round(float(v), 2) for v in vals]
+            for band, vals in bands.items()
+        }
+
+    return {
+        "times_sec": [round(float(t), 2) for t in (times_master if times_master is not None else [])],
+        "channels": channels_out,
+    }
+
+
 def calculate_stats_from_data(
     data: np.ndarray,
     sfreq: float,
@@ -590,6 +753,11 @@ def analyze_eeg_clinical(
         # Per-channel powers for the topographic scalp map
         kanalu_galia = compute_channel_band_powers(all_data, all_ch_names, sfreq)
 
+        # Time-resolved data for spectrogram + drill-down views
+        spektrograma = compute_spectrogram(all_data, sfreq)
+        juostu_dinamika = compute_band_power_timeseries(all_data, sfreq)
+        kanalu_dinamika = compute_channel_band_timeseries(all_data, all_ch_names, sfreq)
+
         analysis = {
             "informacija": {
                 "failas":      file_path,
@@ -598,6 +766,9 @@ def analyze_eeg_clinical(
             },
             "rezultatai": band_results,
             "kanalu_galia": kanalu_galia,
+            "spektrograma": spektrograma,
+            "juostu_dinamika": juostu_dinamika,
+            "kanalu_dinamika": kanalu_dinamika,
         }
 
         return analysis
