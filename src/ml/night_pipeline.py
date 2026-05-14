@@ -256,7 +256,7 @@ def process_night_analysis_job(analysis_job_id: int) -> dict[str, Any]:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         x_new, time_hours = load_subject(local_file_path)
-        y = MODEL.predict(x_new)
+        y = MODEL.predict(x_new, n_jobs=-1)
 
         raw = mne.io.read_raw_edf(local_file_path, preload=True, verbose=False)
         # Fix: Pick only the first 7 EEG channels to match the 28 features expected by the model
